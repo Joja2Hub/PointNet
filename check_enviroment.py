@@ -3,7 +3,29 @@ import laspy
 import numpy as np
 import sys
 import platform
+import os
+import traceback
+from datetime import datetime
 from collections import Counter
+
+class Logger:
+    """Класс для логирования в файл и консоль одновременно"""
+    def __init__(self, filename):
+        os.makedirs('logs', exist_ok=True)
+        self.terminal = sys.stdout
+        self.log = open(filename, 'w', encoding='utf-8')
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
 
 def diagnose_environment():
     """Диагностика окружения"""
@@ -24,7 +46,7 @@ def diagnose_environment():
         print(f"Имя GPU: {torch.cuda.get_device_name()}")
         print(f"CUDA версия: {torch.version.cuda}")
     else:
-        print("CUDA недоступна - будет использоваться CPU")
+        print("⚠️  CUDA недоступна - будет использоваться CPU")
     
     # Память
     if torch.cuda.is_available():
@@ -86,14 +108,15 @@ def analyze_las_dataset(las_file):
             print(f"  Number of returns: {dict(zip(unique_returns, return_counts))}")
         
         # Размер файла
-        import os
         file_size = os.path.getsize(las_file) / (1024**2)  # в MB
         print(f"\nРазмер файла: {file_size:.2f} MB")
         
         return las
         
     except Exception as e:
-        print(f"Ошибка при чтении LAS файла: {e}")
+        print(f"❌ Ошибка при чтении LAS файла: {e}")
+        print("\nПолная трассировка ошибки:")
+        print(traceback.format_exc())
         return None
 
 def test_data_loading(las_file, sample_size=10000):
@@ -116,7 +139,7 @@ def test_data_loading(las_file, sample_size=10000):
             if hasattr(las, 'classification'):
                 labels = las.classification
         
-        print(f"Загружено точек: {len(points)}")
+        print(f"✅ Загружено точек: {len(points)}")
         print(f"Форма точек: {points.shape}")
         
         # Нормализация для проверки
@@ -133,12 +156,87 @@ def test_data_loading(las_file, sample_size=10000):
         
         # Тест преобразования в тензор
         points_tensor = torch.FloatTensor(points).T
-        print(f"Успешно преобразовано в тензор PyTorch: {points_tensor.shape}")
+        print(f"✅ Успешно преобразовано в тензор PyTorch: {points_tensor.shape}")
         
         return True
         
     except Exception as e:
-        print(f"Ошибка при тесте загрузки: {e}")
+        print(f"❌ Ошибка при тесте загрузки: {e}")
+        print("\nПолная трассировка ошибки:")
+        print(traceback.format_exc())
+        return False
+
+def test_model_creation():
+    """Тест создания модели"""
+    print(f"\n{'='*60}")
+    print("ТЕСТ СОЗДАНИЯ МОДЕЛИ")
+    print("="*60)
+    
+    try:
+        from model import PointNet2SemSeg
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Устройство: {device}")
+        
+        model = PointNet2SemSeg(num_classes=8).to(device)
+        print(f"✅ Модель создана успешно")
+        
+        # Тест forward pass
+        test_input = torch.randn(2, 3, 4096).to(device)
+        with torch.no_grad():
+            output = model(test_input)
+        
+        print(f"✅ Forward pass: input {test_input.shape} -> output {output.shape}")
+        
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"📊 Всего параметров: {total_params:,}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка при создании модели: {e}")
+        print("\nПолная трассировка ошибки:")
+        print(traceback.format_exc())
+        return False
+
+def test_dataset_creation():
+    """Тест создания датасета"""
+    print(f"\n{'='*60}")
+    print("ТЕСТ СОЗДАНИЯ ДАТАСЕТА")
+    print("="*60)
+    
+    try:
+        from dataset import LASDataset
+        
+        print("Создание датасета...")
+        dataset = LASDataset(
+            'Univer2019.las',
+            num_points=4096,
+            block_size=50.0,
+            stride=25.0,
+            train=True
+        )
+        
+        print(f"✅ Датасет создан: {len(dataset)} блоков")
+        
+        if len(dataset) == 0:
+            print("⚠️  Датасет пустой!")
+            return False
+        
+        # Тест загрузки одного блока
+        print("\nТест загрузки блока...")
+        points, labels = dataset[0]
+        print(f"✅ Блок загружен:")
+        print(f"   Points shape: {points.shape}")
+        print(f"   Labels shape: {labels.shape}")
+        print(f"   Unique labels: {torch.unique(labels).tolist()}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка при создании датасета: {e}")
+        print("\nПолная трассировка ошибки:")
+        print(traceback.format_exc())
         return False
 
 def suggest_training_params(las_file):
@@ -194,43 +292,197 @@ def suggest_training_params(las_file):
         return num_points, batch_size, num_classes
         
     except Exception as e:
-        print(f"Ошибка при анализе параметров: {e}")
+        print(f"❌ Ошибка при анализе параметров: {e}")
+        print(traceback.format_exc())
         return 4096, 2, 8
 
+def check_all_files():
+    """Проверка наличия всех необходимых файлов"""
+    print(f"\n{'='*60}")
+    print("ПРОВЕРКА ФАЙЛОВ")
+    print("="*60)
+    
+    required_files = {
+        'Univer2019.las': 'Исходный датасет (размеченный)',
+        'model.py': 'Архитектура модели',
+        'dataset.py': 'Загрузчик данных',
+        'train.py': 'Скрипт обучения',
+        'predict.py': 'Скрипт предсказания',
+        'visualize.py': 'Визуализация',
+    }
+    
+    optional_files = {
+        'unlabeled.las': 'Неразмеченный датасет',
+        'checkpoints/best_model.pth': 'Обученная модель',
+        'predicted.las': 'Результат предсказания',
+    }
+    
+    all_ok = True
+    
+    print("\nОбязательные файлы:")
+    for file, desc in required_files.items():
+        if os.path.exists(file):
+            size = os.path.getsize(file) / (1024 * 1024)
+            print(f"  ✅ {file:20s} ({size:>8.2f} MB) - {desc}")
+        else:
+            print(f"  ❌ {file:20s} НЕ НАЙДЕН - {desc}")
+            all_ok = False
+    
+    print("\nДополнительные файлы:")
+    for file, desc in optional_files.items():
+        if os.path.exists(file):
+            size = os.path.getsize(file) / (1024 * 1024)
+            print(f"  ✅ {file:30s} ({size:>8.2f} MB) - {desc}")
+        else:
+            print(f"  ⚠️  {file:30s} не найден - {desc}")
+    
+    return all_ok
+
 def main():
+    """Главная функция с полной диагностикой"""
+    # Настройка логирования
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f'logs/diagnostic_{timestamp}.log'
+    logger = Logger(log_file)
+    sys.stdout = logger
+    sys.stderr = logger
+    
+    print(f"📝 Диагностика запущена: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📋 Лог сохраняется в: {log_file}\n")
+    
     las_file = "Univer2019.las"
     
-    # Диагностика окружения
-    diagnose_environment()
+    results = {}
     
-    # Анализ датасета
-    las_data = analyze_las_dataset(las_file)
+    # 1. Диагностика окружения
+    try:
+        diagnose_environment()
+        results['Окружение'] = '✅'
+    except Exception as e:
+        print(f"\n❌ Ошибка в диагностике окружения:")
+        print(traceback.format_exc())
+        results['Окружение'] = '❌'
     
+    # 2. Проверка файлов
+    try:
+        files_ok = check_all_files()
+        results['Файлы'] = '✅' if files_ok else '⚠️'
+    except Exception as e:
+        print(f"\n❌ Ошибка при проверке файлов:")
+        print(traceback.format_exc())
+        results['Файлы'] = '❌'
+    
+    # 3. Анализ датасета
+    try:
+        las_data = analyze_las_dataset(las_file)
+        results['Датасет'] = '✅' if las_data is not None else '❌'
+    except Exception as e:
+        print(f"\n❌ Ошибка при анализе датасета:")
+        print(traceback.format_exc())
+        results['Датасет'] = '❌'
+        las_data = None
+    
+    # 4. Тест загрузки данных
     if las_data is not None:
-        # Тест загрузки
-        test_success = test_data_loading(las_file)
-        
-        if test_success:
-            # Рекомендации
-            num_points, batch_size, num_classes = suggest_training_params(las_file)
-            
-            print(f"\n{'='*60}")
-            print("СВОДКА")
-            print("="*60)
-            print(f"Файл: {las_file}")
-            print(f"CUDA доступна: {torch.cuda.is_available()}")
-            print(f"Рекомендуемый размер блока: {num_points}")
-            print(f"Рекомендуемый размер батча: {batch_size}")
-            print(f"Количество классов: {num_classes}")
-            
-            if not torch.cuda.is_available():
-                print(f"\n⚠️  ВНИМАНИЕ: CUDA недоступна!")
-                print(f"   Обучение будет происходить на CPU, что может быть медленнее.")
-                print(f"   Рассмотрите установку PyTorch с поддержкой CUDA.")
-        else:
-            print(f"\n❌ Тест загрузки не удался!")
+        try:
+            test_success = test_data_loading(las_file)
+            results['Загрузка данных'] = '✅' if test_success else '❌'
+        except Exception as e:
+            print(f"\n❌ Ошибка при тесте загрузки:")
+            print(traceback.format_exc())
+            results['Загрузка данных'] = '❌'
+            test_success = False
     else:
-        print(f"\n❌ Не удалось загрузить LAS файл: {las_file}")
+        results['Загрузка данных'] = '⏭️'
+        test_success = False
+    
+    # 5. Тест создания модели
+    try:
+        model_ok = test_model_creation()
+        results['Модель'] = '✅' if model_ok else '❌'
+    except Exception as e:
+        print(f"\n❌ Ошибка при тесте модели:")
+        print(traceback.format_exc())
+        results['Модель'] = '❌'
+    
+    # 6. Тест создания датасета
+    try:
+        dataset_ok = test_dataset_creation()
+        results['Dataset класс'] = '✅' if dataset_ok else '❌'
+    except Exception as e:
+        print(f"\n❌ Ошибка при тесте Dataset:")
+        print(traceback.format_exc())
+        results['Dataset класс'] = '❌'
+    
+    # 7. Рекомендации
+    if test_success:
+        try:
+            num_points, batch_size, num_classes = suggest_training_params(las_file)
+            results['Рекомендации'] = '✅'
+        except Exception as e:
+            print(f"\n❌ Ошибка при формировании рекомендаций:")
+            print(traceback.format_exc())
+            results['Рекомендации'] = '❌'
+    else:
+        results['Рекомендации'] = '⏭️'
+    
+    # Итоговая сводка
+    print(f"\n{'='*60}")
+    print("ИТОГОВАЯ СВОДКА")
+    print("="*60)
+    
+    for test_name, status in results.items():
+        print(f"  {test_name:25s} {status}")
+    
+    # Подсчет статуса
+    passed = sum(1 for s in results.values() if s == '✅')
+    failed = sum(1 for s in results.values() if s == '❌')
+    warnings = sum(1 for s in results.values() if s == '⚠️')
+    skipped = sum(1 for s in results.values() if s == '⏭️')
+    
+    print(f"\n📊 Статистика:")
+    print(f"  Пройдено: {passed}")
+    print(f"  Ошибок: {failed}")
+    print(f"  Предупреждений: {warnings}")
+    print(f"  Пропущено: {skipped}")
+    
+    print(f"\n{'='*60}")
+    
+    if failed == 0 and warnings == 0:
+        print("✅ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ!")
+        print("="*60)
+        print("\n💡 Система готова к обучению!")
+        print("\nСледующие шаги:")
+        print("  1. python train.py - начать обучение")
+        print("  2. python quick_start.py - автоматический запуск")
+    elif failed > 0:
+        print("❌ ОБНАРУЖЕНЫ КРИТИЧЕСКИЕ ОШИБКИ!")
+        print("="*60)
+        print(f"\n📋 Полный лог ошибок сохранен в: {log_file}")
+        print("\n💡 Рекомендации:")
+        if 'Модель' in results and results['Модель'] == '❌':
+            print("  • Проверьте файл model.py")
+        if 'Dataset класс' in results and results['Dataset класс'] == '❌':
+            print("  • Проверьте файл dataset.py")
+        if 'Датасет' in results and results['Датасет'] == '❌':
+            print("  • Проверьте файл Univer2019.las")
+    else:
+        print("⚠️  ЕСТЬ ПРЕДУПРЕЖДЕНИЯ")
+        print("="*60)
+        print(f"\n📋 Лог сохранен в: {log_file}")
+        print("\n💡 Можно попробовать запустить обучение, но могут быть проблемы")
+    
+    # Финальная информация
+    print(f"\n📝 Полный отчет сохранен в: {log_file}")
+    print(f"⏰ Время завершения: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Закрываем лог
+    logger.close()
+    sys.stdout = logger.terminal
+    sys.stderr = logger.terminal
+    
+    return failed == 0
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    sys.exit(0 if success else 1)
