@@ -11,13 +11,16 @@ def print_menu():
     print("  3. 📊 Визуализировать Univer2019.las (размеченный)")
     print("  4. 📊 Визуализировать predicted.las")
     print("  5. 🔄 Сравнить оригинал и предсказание")
-    print("  6. ❌ Выход")
+    print("  6. 📋 Просмотреть логи")
+    print("  7. 🔍 Запустить системный тест")
+    print("  8. 🐛 Анализ датасета")
+    print("  9. ❌ Выход")
     print("="*60)
 
 def main():
     while True:
         print_menu()
-        choice = input("\n👉 Ваш выбор (1-6): ").strip()
+        choice = input("\n👉 Ваш выбор (1-9): ").strip()
         
         if choice == '1':
             print("\n🏋️  Запуск обучения...\n")
@@ -30,6 +33,7 @@ def main():
             
             if not os.path.exists('unlabeled.las'):
                 print("\n❌ Файл unlabeled.las не найден!")
+                print("💡 Создайте его: python create_unlabeled.py")
                 continue
             
             print("\n🔮 Применение модели...\n")
@@ -65,6 +69,18 @@ def main():
             compare_las_files('Univer2019.las', 'predicted.las')
         
         elif choice == '6':
+            print("\n📋 Просмотр логов...\n")
+            os.system('python view_logs.py')
+        
+        elif choice == '7':
+            print("\n🔍 Запуск системного теста...\n")
+            os.system('python check_enviroment.py')
+
+        elif choice == '8':
+            print("\n🔍 Анализ датасета...\n")
+            os.system('python analyze_dataset.py')
+        
+        elif choice == '9':
             print("\n👋 До свидания!")
             sys.exit(0)
         
