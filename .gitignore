@@ -1,6 +1,7 @@
 pointnet_env/
 Univer2019.las
 unlabeled.las
+predicted.
 logs/
 checkpoints/
 __pycache__
