@@ -14,13 +14,14 @@ def print_menu():
     print("  6. 📋 Просмотреть логи")
     print("  7. 🔍 Запустить системный тест")
     print("  8. 🐛 Анализ датасета")
-    print("  9. ❌ Выход")
+    print("  9. 🧹 Очистить размеченный датасет")
+    print(" 10. ❌ Выход")
     print("="*60)
 
 def main():
     while True:
         print_menu()
-        choice = input("\n👉 Ваш выбор (1-9): ").strip()
+        choice = input("\n👉 Ваш выбор (1-10): ").strip()
         
         if choice == '1':
             print("\n🏋️  Запуск обучения...\n")
@@ -33,7 +34,7 @@ def main():
             
             if not os.path.exists('unlabeled.las'):
                 print("\n❌ Файл unlabeled.las не найден!")
-                print("💡 Создайте его: python create_unlabeled.py")
+                print("💡 Создайте его: запустите пункт 9 или python create_unlabeled.py")
                 continue
             
             print("\n🔮 Применение модели...\n")
@@ -81,6 +82,10 @@ def main():
             os.system('python analyze_dataset.py')
         
         elif choice == '9':
+            print("\n🧹 Запуск очистки размеченного датасета...\n")
+            os.system('python create_unlabeled.py')
+        
+        elif choice == '10':
             print("\n👋 До свидания!")
             sys.exit(0)
         
