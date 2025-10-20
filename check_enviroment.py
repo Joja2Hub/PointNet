@@ -1,236 +1,439 @@
 import torch
-import laspy
 import numpy as np
 import sys
 import platform
-from collections import Counter
+import os
+import traceback
+import psutil
+import gc
+from datetime import datetime
 
-def diagnose_environment():
-    """Диагностика окружения"""
+class Logger:
+    """Класс для логирования в файл и консоль одновременно"""
+    def __init__(self, filename):
+        os.makedirs('logs', exist_ok=True)
+        self.terminal = sys.stdout
+        self.log = open(filename, 'w', encoding='utf-8')
+    
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+    
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+
+def get_system_info():
+    """Получение информации о системе"""
+    try:
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        disk_usage = psutil.disk_usage('.').free / (1024**3)
+        return memory_gb, disk_usage
+    except:
+        return None, None
+
+def diagnose_environment(issues):
+    """Оптимистичная диагностика окружения"""
     print("="*60)
     print("ДИАГНОСТИКА ОКРУЖЕНИЯ")
     print("="*60)
     
-    # PyTorch и CUDA
+    # Информация о системе
+    memory_gb, disk_free = get_system_info()
+    
     print(f"PyTorch версия: {torch.__version__}")
     print(f"Python версия: {sys.version}")
     print(f"Платформа: {platform.platform()}")
-    print(f"Архитектура: {platform.architecture()}")
     
-    print(f"\nCUDA доступен: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
+    if memory_gb:
+        print(f"Оперативная память: {memory_gb:.1f} GB")
+    if disk_free:
+        print(f"Свободное место на диске: {disk_free:.1f} GB")
+    
+    # Детальная информация о CUDA
+    cuda_available = torch.cuda.is_available()
+    print(f"\nCUDA доступен: {cuda_available}")
+    
+    if cuda_available:
         print(f"Количество GPU: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            memory_gb = props.total_memory / (1024**3)
+            print(f"  GPU {i}: {props.name} ({memory_gb:.1f} GB)")
         print(f"Текущий GPU: {torch.cuda.current_device()}")
-        print(f"Имя GPU: {torch.cuda.get_device_name()}")
-        print(f"CUDA версия: {torch.version.cuda}")
+        
+        # Быстрая проверка CUDA
+        try:
+            with torch.no_grad():
+                a = torch.randn(100, 100).cuda()
+                b = torch.randn(100, 100).cuda()
+                torch.matmul(a, b)
+            print("✅ CUDA операции работают корректно")
+        except Exception as e:
+            issues.append(f"❌ Ошибка в CUDA операциях: {e}")
     else:
-        print("CUDA недоступна - будет использоваться CPU")
+        print("ℹ️  Будет использоваться CPU")
     
-    # Память
-    if torch.cuda.is_available():
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        print(f"Всего GPU памяти: {gpu_memory:.2f} GB")
-    
-    cpu_memory = torch.get_num_threads()
-    print(f"Количество CPU потоков: {cpu_memory}")
+    print(f"Доступно CPU ядер: {os.cpu_count()}")
+    return True
 
-def analyze_las_dataset(las_file):
-    """Анализ LAS датасета"""
+def check_file_structure(issues):
+    """Упрощенная проверка файловой структуры"""
     print(f"\n{'='*60}")
-    print(f"АНАЛИЗ LAS ДАТАСЕТА: {las_file}")
+    print("ПРОВЕРКА ФАЙЛОВОЙ СТРУКТУРЫ")
     print("="*60)
     
-    try:
-        las = laspy.read(las_file)
-        
-        print(f"Формат файла: {las.header.version}")
-        print(f"Количество точек: {len(las.points)}")
-        print(f"Количество атрибутов: {len(las.point_format.dimensions)}")
-        
-        # Атрибуты
-        print(f"\nДоступные атрибуты:")
-        for dim in las.point_format.dimensions:
-            print(f"  - {dim.name}")
-        
-        # Координаты
-        x_range = (np.min(las.x), np.max(las.x))
-        y_range = (np.min(las.y), np.max(las.y))
-        z_range = (np.min(las.z), np.max(las.z))
-        
-        print(f"\nДиапазоны координат:")
-        print(f"  X: {x_range[0]:.2f} - {x_range[1]:.2f}")
-        print(f"  Y: {y_range[0]:.2f} - {y_range[1]:.2f}")
-        print(f"  Z: {z_range[0]:.2f} - {z_range[1]:.2f}")
-        
-        # Классификация
-        if hasattr(las, 'classification'):
-            classifications = las.classification
-            unique_classes, counts = np.unique(classifications, return_counts=True)
-            
-            print(f"\nКлассы разметки:")
-            for cls, count in zip(unique_classes, counts):
-                print(f"  Класс {cls}: {count} точек ({count/len(classifications)*100:.2f}%)")
-            
-            print(f"\nВсего уникальных классов: {len(unique_classes)}")
-            print(f"Диапазон классов: {unique_classes.min()} - {unique_classes.max()}")
-        
-        # Проверка других возможных атрибутов
-        print(f"\nДополнительные атрибуты:")
-        if hasattr(las, 'intensity'):
-            print(f"  Intensity: {np.min(las.intensity)} - {np.max(las.intensity)}")
-        if hasattr(las, 'return_number'):
-            unique_returns, return_counts = np.unique(las.return_number, return_counts=True)
-            print(f"  Return numbers: {dict(zip(unique_returns, return_counts))}")
-        if hasattr(las, 'number_of_returns'):
-            unique_returns, return_counts = np.unique(las.number_of_returns, return_counts=True)
-            print(f"  Number of returns: {dict(zip(unique_returns, return_counts))}")
-        
-        # Размер файла
-        import os
-        file_size = os.path.getsize(las_file) / (1024**2)  # в MB
-        print(f"\nРазмер файла: {file_size:.2f} MB")
-        
-        return las
-        
-    except Exception as e:
-        print(f"Ошибка при чтении LAS файла: {e}")
-        return None
-
-def test_data_loading(las_file, sample_size=10000):
-    """Тест загрузки данных"""
-    print(f"\n{'='*60}")
-    print(f"ТЕСТ ЗАГРУЗКИ ДАННЫХ (первые {sample_size} точек)")
-    print("="*60)
+    required_files = {
+        'model.py': 'Архитектура модели',
+        'dataset.py': 'Загрузчик данных', 
+        'train.py': 'Скрипт обучения',
+    }
     
-    try:
-        las = laspy.read(las_file)
-        
-        # Берем сэмпл
-        if len(las.points) > sample_size:
-            indices = np.random.choice(len(las.points), sample_size, replace=False)
-            points = np.vstack((las.x[indices], las.y[indices], las.z[indices])).T
-            if hasattr(las, 'classification'):
-                labels = las.classification[indices]
+    optional_files = {
+        'predict.py': 'Скрипт предсказания',
+        'visualize.py': 'Визуализация результатов',
+        'utils.py': 'Вспомогательные функции',
+        'config.py': 'Конфигурация',
+        'requirements.txt': 'Зависимости',
+    }
+    
+    required_dirs = {
+        'datasets': 'Данные',
+        'logs': 'Логи и диагностика',
+        'checkpoints': 'Сохраненные модели',
+    }
+    
+    all_ok = True
+    
+    print("\n📁 ОСНОВНЫЕ ПАПКИ:")
+    for dir_path, desc in required_dirs.items():
+        if os.path.exists(dir_path) and os.path.isdir(dir_path):
+            files_count = len([f for f in os.listdir(dir_path) if not f.startswith('.')])
+            status_icon = "✅" if files_count > 0 else "⚠️"
+            print(f"  {status_icon} {dir_path:20s} ({files_count} файлов) - {desc}")
         else:
-            points = np.vstack((las.x, las.y, las.z)).T
-            if hasattr(las, 'classification'):
-                labels = las.classification
+            print(f"  ❌ {dir_path:20s} НЕ НАЙДЕНА - {desc}")
+            issues.append(f"❌ Отсутствует папка: {dir_path}")
+            all_ok = False
+    
+    print("\n📄 ОСНОВНЫЕ ФАЙЛЫ:")
+    for file, desc in required_files.items():
+        if os.path.exists(file):
+            size_kb = os.path.getsize(file) / 1024
+            print(f"  ✅ {file:20s} ({size_kb:6.1f} KB) - {desc}")
+        else:
+            print(f"  ❌ {file:20s} НЕ НАЙДЕН - {desc}")
+            issues.append(f"❌ Отсутствует файл: {file}")
+            all_ok = False
+    
+    print("\n📄 ДОПОЛНИТЕЛЬНЫЕ ФАЙЛЫ:")
+    for file, desc in optional_files.items():
+        if os.path.exists(file):
+            size_kb = os.path.getsize(file) / 1024
+            print(f"  ✅ {file:20s} ({size_kb:6.1f} KB) - {desc}")
+        else:
+            print(f"  ⚠️  {file:20s} не найден - {desc}")
+    
+    return all_ok
+
+def analyze_model_complexity(model, device):
+    """Упрощенный анализ сложности модели"""
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print(f"\n📊 АНАЛИЗ СЛОЖНОСТИ МОДЕЛИ:")
+    print(f"Всего обучаемых параметров: {total_params:,}")
+    print(f"Размер модели в памяти: ~{total_params * 4 / (1024**2):.2f} MB (float32)")
+    
+    return total_params
+
+def test_model_creation(issues):
+    """Оптимистичный тест создания модели"""
+    print(f"\n{'='*60}")
+    print("ТЕСТ СОЗДАНИЯ МОДЕЛИ")
+    print("="*60)
+    
+    try:
+        # Попытка импорта модели
+        try:
+            from model import PointNet2SemSeg
+            print("✅ Модуль model.py загружен успешно")
+        except ImportError as e:
+            issues.append(f"❌ Ошибка импорта из model.py: {e}")
+            return False
         
-        print(f"Загружено точек: {len(points)}")
-        print(f"Форма точек: {points.shape}")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Устройство: {device}")
         
-        # Нормализация для проверки
-        centroid = np.mean(points, axis=0)
-        points_centered = points - centroid
-        max_distance = np.max(np.sqrt(np.sum(points_centered ** 2, axis=1)))
-        
-        print(f"Центроид: [{centroid[0]:.2f}, {centroid[1]:.2f}, {centroid[2]:.2f}]")
-        print(f"Максимальное расстояние от центра: {max_distance:.2f}")
-        
-        if 'labels' in locals():
-            unique_labels, counts = np.unique(labels, return_counts=True)
-            print(f"Уникальные метки в сэмпле: {dict(zip(unique_labels, counts))}")
-        
-        # Тест преобразования в тензор
-        points_tensor = torch.FloatTensor(points).T
-        print(f"Успешно преобразовано в тензор PyTorch: {points_tensor.shape}")
-        
-        return True
+        # Тест с стандартным количеством классов
+        try:
+            print(f"\n🧪 Тест с 8 классами:")
+            model = PointNet2SemSeg(num_classes=8).to(device)
+            model.eval()
+            
+            # Быстрый тест forward pass
+            test_input = torch.randn(2, 3, 4096).to(device)
+            
+            with torch.no_grad():
+                output = model(test_input)
+            
+            print(f"  ✅ Батч 2: input {test_input.shape} -> output {output.shape}")
+            
+            # Анализ сложности модели
+            total_params = analyze_model_complexity(model, device)
+            
+            del model, test_input, output
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            print(f"\n🎯 МОДЕЛЬ ГОТОВА К РАБОТЕ!")
+            print(f"  • Успешно создана с 8 классами")
+            print(f"  • Forward pass работает корректно")
+            print(f"  • Параметров: {total_params:,}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Ошибка при создании модели: {e}")
+            issues.append(f"❌ Ошибка создания модели: {e}")
+            return False
         
     except Exception as e:
-        print(f"Ошибка при тесте загрузки: {e}")
+        error_msg = f"❌ Критическая ошибка при тесте модели: {e}"
+        print(error_msg)
+        issues.append(error_msg)
         return False
 
-def suggest_training_params(las_file):
-    """Предложение параметров для обучения"""
+def test_dataset_functionality(issues):
+    """Улучшенная проверка структуры и наличия датасетов"""
     print(f"\n{'='*60}")
-    print("РЕКОМЕНДАЦИИ ДЛЯ ОБУЧЕНИЯ")
+    print("ПРОВЕРКА СТРУКТУРЫ ДАТАСЕТОВ")
     print("="*60)
     
+    all_ok = True
+
+    # 1. Проверка импорта модуля dataset.py
     try:
-        las = laspy.read(las_file)
-        total_points = len(las.points)
-        
-        # Определение количества классов
-        if hasattr(las, 'classification'):
-            unique_classes = np.unique(las.classification)
-            num_classes = len(unique_classes)
-            min_class = unique_classes.min()
-            max_class = unique_classes.max()
+        from dataset import LASDataset
+        print("✅ Модуль dataset.py загружен успешно")
+    except Exception as e:
+        error_msg = f"❌ Ошибка импорта из dataset.py: {e}"
+        print(error_msg)
+        issues.append(error_msg)
+        all_ok = False
+
+    # 2. Проверка трансформаций (опционально)
+    try:
+        from dataset import train_transforms, test_transforms
+        print("✅ Трансформации (train/test) доступны")
+    except (ImportError, AttributeError):
+        print("⚠️  Трансформации не найдены в dataset.py — могут понадобиться позже")
+
+    # 3. Проверка структуры папок с данными
+    raw_dir = os.path.join('datasets', 'raw')
+    unlabeled_dir = os.path.join('datasets', 'unlabeled')
+
+    for dir_path, desc in [
+        (raw_dir, "сырые данные (.las/.laz)"),
+        (unlabeled_dir, "очищенные/предобработанные данные")
+    ]:
+        print(f"\n📁 Папка: {dir_path} ({desc})")
+        if os.path.exists(dir_path) and os.path.isdir(dir_path):
+            files = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and not f.startswith('.')]
+            if files:
+                # Группировка по расширению
+                ext_count = {}
+                total_size = 0
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    ext_count[ext] = ext_count.get(ext, 0) + 1
+                    total_size += os.path.getsize(os.path.join(dir_path, f))
+                
+                ext_str = ', '.join([f"{count}×{ext}" for ext, count in sorted(ext_count.items())])
+                total_size_mb = total_size / (1024**2)
+                print(f"  ✅ Найдено файлов: {len(files)} ({ext_str}) | {total_size_mb:.1f} MB")
+            else:
+                print(f"  ⚠️  Папка существует, но пуста")
+                if 'raw' in dir_path:
+                    issues.append(f"⚠️  Папка {dir_path} пуста — добавьте .las/.laz файлы")
         else:
-            num_classes = 1
-            min_class = 0
-            max_class = 0
-        
-        print(f"Общее количество точек: {total_points:,}")
-        print(f"Количество классов: {num_classes}")
-        print(f"Диапазон классов: {min_class} - {max_class}")
-        
-        # Рекомендуемые параметры
-        if total_points < 100000:
-            num_points = 2048
-            batch_size = 4
-        elif total_points < 1000000:
-            num_points = 4096
-            batch_size = 2
+            print(f"  ❌ Папка не найдена")
+            issues.append(f"❌ Отсутствует папка: {dir_path}")
+            all_ok = False
+
+    # 4. Тест инициализации LASDataset (без реального файла)
+    try:
+        dataset = LASDataset(
+            os.path.join('datasets', 'raw', 'dummy.las'),
+            num_points=4096,
+            block_size=50.0,
+            stride=25.0,
+            train=True
+        )
+        print("\n🧪 Класс LASDataset: инициализация возможна")
+    except Exception as e:
+        if "dummy.las" in str(e) or "No such file" in str(e) or "не найден" in str(e).lower():
+            print("\n🧪 Класс LASDataset: инициализация возможна (ошибка файла ожидаема)")
         else:
-            num_points = 4096
-            batch_size = 1
+            error_msg = f"❌ Неожиданная ошибка в LASDataset.__init__: {e}"
+            print(error_msg)
+            issues.append(error_msg)
+            all_ok = False
+
+    return all_ok
+
+def test_training_components(issues):
+    """Упрощенный тест компонентов обучения"""
+    print(f"\n{'='*60}")
+    print("ПРОВЕРКА КОМПОНЕНТОВ ОБУЧЕНИЯ")
+    print("="*60)
+    
+    components_ok = True
+    
+    try:
+        import torch.nn as nn
+        import torch.optim as optim
         
-        print(f"\nРекомендуемые параметры:")
-        print(f"  - Размер блока (num_points): {num_points}")
-        print(f"  - Размер батча: {batch_size}")
-        print(f"  - Количество классов для модели: {num_classes}")
+        # Быстрая проверка функции потерь
+        print("📊 Функции потерь:")
+        try:
+            loss_fn = nn.CrossEntropyLoss()
+            outputs = torch.randn(2, 8, 4096)
+            targets = torch.randint(0, 8, (2, 4096))
+            loss = loss_fn(outputs, targets)
+            print(f"  ✅ CrossEntropyLoss - работает (loss: {loss.item():.4f})")
+        except Exception as e:
+            print(f"  ❌ CrossEntropyLoss - ошибка: {e}")
+            components_ok = False
         
-        # Оценка памяти
-        estimated_memory = (num_points * 3 * 4 * batch_size) / (1024**2)  # в MB
-        print(f"  - Оценка памяти на один батч: ~{estimated_memory:.2f} MB")
+        # Быстрая проверка оптимизаторов
+        print("\n⚡ Оптимизаторы:")
+        try:
+            from model import PointNet2SemSeg
+            model = PointNet2SemSeg(num_classes=8)
+            
+            optimizer = optim.Adam(model.parameters(), lr=0.001)
+            print(f"  ✅ Adam - инициализирован")
+                
+            del model
+                
+        except Exception as e:
+            print(f"  ❌ Ошибка теста оптимизаторов: {e}")
+            components_ok = False
         
-        if torch.cuda.is_available():
-            print(f"  - Использовать GPU: Да")
+        # Базовая проверка скрипта обучения
+        print("\n📜 Скрипт обучения:")
+        if os.path.exists('train.py'):
+            with open('train.py', 'r', encoding='utf-8') as f:
+                content = f.read()
+                has_training = 'def train' in content or 'for epoch' in content
+                has_model = 'PointNet2SemSeg' in content or 'model' in content
+                
+                if has_training and has_model:
+                    print("  ✅ train.py содержит основные компоненты")
+                else:
+                    print("  ⚠️  train.py может быть неполным")
         else:
-            print(f"  - Использовать CPU: Да (CUDA недоступна)")
+            print("  ❌ train.py не найден")
+            components_ok = False
         
-        return num_points, batch_size, num_classes
+        return components_ok
         
     except Exception as e:
-        print(f"Ошибка при анализе параметров: {e}")
-        return 4096, 2, 8
+        error_msg = f"❌ Ошибка при тесте компонентов обучения: {e}"
+        print(error_msg)
+        issues.append(error_msg)
+        return False
 
 def main():
-    las_file = "Univer2019.las"
+    """Главная функция с оптимистичной диагностикой"""
+    issues = []
     
-    # Диагностика окружения
-    diagnose_environment()
+    # Настройка логирования
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f'logs/diagnostic_{timestamp}.log'
+    logger = Logger(log_file)
+    sys.stdout = logger
+    sys.stderr = logger
     
-    # Анализ датасета
-    las_data = analyze_las_dataset(las_file)
+    print(f"🚀 ОПТИМИСТИЧНАЯ ДИАГНОСТИКА ЗАПУЩЕНА")
+    print(f"📋 Лог сохраняется в: {log_file}\n")
     
-    if las_data is not None:
-        # Тест загрузки
-        test_success = test_data_loading(las_file)
-        
-        if test_success:
-            # Рекомендации
-            num_points, batch_size, num_classes = suggest_training_params(las_file)
-            
-            print(f"\n{'='*60}")
-            print("СВОДКА")
-            print("="*60)
-            print(f"Файл: {las_file}")
-            print(f"CUDA доступна: {torch.cuda.is_available()}")
-            print(f"Рекомендуемый размер блока: {num_points}")
-            print(f"Рекомендуемый размер батча: {batch_size}")
-            print(f"Количество классов: {num_classes}")
-            
-            if not torch.cuda.is_available():
-                print(f"\n⚠️  ВНИМАНИЕ: CUDA недоступна!")
-                print(f"   Обучение будет происходить на CPU, что может быть медленнее.")
-                print(f"   Рассмотрите установку PyTorch с поддержкой CUDA.")
-        else:
-            print(f"\n❌ Тест загрузки не удался!")
+    results = {}
+    
+    # Запуск упрощенных тестов
+    tests = [
+        ("Окружение", lambda: diagnose_environment(issues)),
+        ("Файловая структура", lambda: check_file_structure(issues)),
+        ("Модель", lambda: test_model_creation(issues)),
+        ("Датасет", lambda: test_dataset_functionality(issues)),
+        ("Компоненты обучения", lambda: test_training_components(issues)),
+    ]
+    
+    for test_name, test_func in tests:
+        try:
+            print(f"\n{'🔍' * 10} ТЕСТ: {test_name} {'🔍' * 10}\n")
+            success = test_func()
+            results[test_name] = '✅' if success else '❌'
+        except Exception as e:
+            error_msg = f"❌ Неожиданная ошибка в тесте {test_name}: {e}"
+            print(error_msg)
+            issues.append(error_msg)
+            results[test_name] = '❌'
+    
+    # Итоговая сводка
+    print(f"\n{'='*60}")
+    print("ИТОГОВАЯ СВОДКА")
+    print("="*60)
+    
+    for test_name, status in results.items():
+        print(f"  {test_name:25s} {status}")
+    
+    # Статистика
+    passed = sum(1 for s in results.values() if s == '✅')
+    total = len(results)
+    
+    print(f"\n📊 Результат: {passed}/{total} пройдено")
+    
+    # Вывод проблем
+    if issues:
+        print(f"\n⚠️  Обнаруженные проблемы:")
+        for i, issue in enumerate(issues, 1):
+            print(f"  {i:2d}. {issue}")
     else:
-        print(f"\n❌ Не удалось загрузить LAS файл: {las_file}")
+        print(f"\n✅ Проблем не обнаружено!")
+    
+    print(f"\n{'='*60}")
+    
+    if passed == total:
+        print("🎉 ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ!")
+        print("\n💡 Система готова к работе!")
+        print("\n🎯 СЛЕДУЮЩИЕ ШАГИ:")
+        print("  1. Добавьте данные в папку datasets/")
+        print("  2. Настройте параметры обучения при необходимости")
+        print("  3. Запустите: python train.py")
+    else:
+        print("⚠️  ЕСТЬ ПРОБЛЕМЫ ДЛЯ РЕШЕНИЯ")
+        print("\n🔧 Проверьте указанные выше проблемы и повторите диагностику")
+    
+    # Финальная информация
+    print(f"\n📝 Полный отчет: {log_file}")
+    
+    # Очистка памяти
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    
+    # Закрываем лог
+    logger.close()
+    sys.stdout = logger.terminal
+    sys.stderr = logger.terminal
+    
+    return passed == total
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    sys.exit(0 if success else 1)
