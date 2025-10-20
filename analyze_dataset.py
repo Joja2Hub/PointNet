@@ -10,7 +10,7 @@ import laspy
 import numpy as np
 from pathlib import Path
 
-DATASETS_DIR = "datasets/row"
+DATASETS_DIR = "datasets/raw"
 
 def list_las_files():
     """Возвращает список .las и .laz файлов в папке datasets/"""
