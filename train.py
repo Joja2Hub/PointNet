@@ -11,6 +11,26 @@ from datetime import datetime
 from model import PointNet2SemSeg
 from dataset import LASDataset
 
+def find_las_file():
+    """Находит LAS файл в различных возможных местах"""
+    possible_paths = [
+        'Univer2019.las',
+        'datasets/raw/Univer2019.las',
+        'datasets/unlabeled/Univer2019.las',
+    ]
+    
+    folders_to_check = ['.', 'datasets/raw', 'datasets/unlabeled']
+    
+    for folder in folders_to_check:
+        if os.path.exists(folder):
+            for file in os.listdir(folder):
+                if file.lower().endswith('.las'):
+                    full_path = os.path.join(folder, file)
+                    print(f"✅ Найден LAS файл: {full_path}")
+                    return full_path
+    
+    return None
+
 def setup_logging():
     """Настройка логирования"""
     os.makedirs('logs', exist_ok=True)
@@ -41,7 +61,6 @@ def calculate_class_weights(dataset):
     print("⚖️  Вычисление весов классов...")
     all_labels = []
     
-    # Берем сэмпл для ускорения
     sample_size = min(1000, len(dataset))
     indices = np.random.choice(len(dataset), sample_size, replace=False)
     
@@ -50,7 +69,6 @@ def calculate_class_weights(dataset):
             _, labels = dataset[i]
             all_labels.append(labels.numpy())
         except Exception as e:
-            print(f"⚠️  Ошибка при загрузке блока {i}: {e}")
             continue
     
     if not all_labels:
@@ -59,6 +77,9 @@ def calculate_class_weights(dataset):
     
     all_labels = np.concatenate(all_labels)
     unique, counts = np.unique(all_labels, return_counts=True)
+    
+    print(f"📊 Найдены классы: {unique + 1}")
+    print(f"📊 Количество точек по классам: {counts}")
     
     total = len(all_labels)
     weights = total / (len(unique) * counts)
@@ -75,6 +96,34 @@ def calculate_class_weights(dataset):
         weight_tensor[class_id] = weight
     
     return weight_tensor
+
+def analyze_dataset_distribution(dataset, dataset_name="датасете"):
+    """Анализ распределения классов в датасете"""
+    print(f"\n📊 Анализ распределения классов в {dataset_name}...")
+    all_labels = []
+    
+    for i in tqdm(range(min(500, len(dataset))), desc="Сбор статистики"):
+        try:
+            _, labels = dataset[i]
+            all_labels.append(labels.numpy())
+        except:
+            continue
+    
+    if all_labels:
+        all_labels = np.concatenate(all_labels)
+        unique, counts = np.unique(all_labels, return_counts=True)
+        
+        print(f"📈 Распределение классов в {dataset_name}:")
+        total_points = len(all_labels)
+        for class_id, count in zip(unique, counts):
+            percentage = 100.0 * count / total_points
+            print(f"   Класс {class_id + 1}: {count} точек ({percentage:.2f}%)")
+        
+        print(f"📊 Всего уникальных классов: {len(unique)}")
+        print(f"📊 Всего точек в выборке: {total_points}")
+        
+        return unique
+    return []
 
 def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch):
     """Одна эпоха обучения"""
@@ -100,7 +149,6 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch):
             
             # Проверка на NaN
             if torch.isnan(loss):
-                print(f"\n⚠️  NaN loss на батче {batch_idx}! Пропускаем...")
                 continue
             
             # Обратный проход
@@ -126,8 +174,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch):
             })
             
         except Exception as e:
-            print(f"\n❌ Ошибка на батче {batch_idx}:")
-            print(traceback.format_exc())
+            print(f"\n❌ Ошибка на батче {batch_idx}: {e}")
             continue
     
     if len(train_loader) == 0:
@@ -139,25 +186,27 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch):
     
     return avg_loss, avg_acc
 
-def validate(model, val_loader, criterion, device):
-    """Валидация модели"""
+def validate(model, val_loader, criterion, device, phase="валидации"):
+    """Валидация модели с улучшенной диагностикой"""
     model.eval()
     total_loss = 0
     total_correct = 0
     total_points = 0
     
-    class_correct = torch.zeros(8)
-    class_total = torch.zeros(8)
+    class_correct = torch.zeros(8, device=device)
+    class_total = torch.zeros(8, device=device)
+    
+    print(f"\n🔍 Детальная диагностика {phase}...")
     
     with torch.no_grad():
-        for points, labels in tqdm(val_loader, desc='Validation'):
+        for batch_idx, (points, labels) in enumerate(tqdm(val_loader, desc=phase)):
             try:
                 points, labels = points.to(device), labels.to(device)
                 
                 pred = model(points)
-                
                 pred = pred.contiguous().view(-1, pred.size(-1))
                 labels_flat = labels.view(-1)
+                
                 loss = criterion(pred, labels_flat)
                 
                 pred_choice = pred.argmax(dim=1)
@@ -175,25 +224,77 @@ def validate(model, val_loader, criterion, device):
                         class_total[c] += mask.sum().item()
                         
             except Exception as e:
-                print(f"\n❌ Ошибка при валидации:")
-                print(traceback.format_exc())
+                print(f"\n❌ Ошибка при {phase} батча {batch_idx}: {e}")
                 continue
     
     if len(val_loader) == 0:
-        print("❌ Нет данных для валидации!")
+        print(f"❌ Нет данных для {phase}!")
         return 0.0, 0.0
     
     avg_loss = total_loss / len(val_loader)
     avg_acc = 100.0 * total_correct / total_points if total_points > 0 else 0.0
     
-    # Per-class accuracy
-    print("\n📊 Точность по классам:")
+    # Детальная статистика
+    print(f"\n📊 ДЕТАЛЬНАЯ СТАТИСТИКА {phase.upper()}:")
+    print("="*50)
+    print("Класс | Точек всего | Точность %")
+    print("-"*50)
+    
+    any_class_processed = False
+    total_val_points = 0
+    
     for c in range(8):
         if class_total[c] > 0:
-            class_acc = 100.0 * class_correct[c] / class_total[c]
-            print(f"   Класс {c+1}: {class_acc:.2f}% ({int(class_total[c])} точек)")
+            any_class_processed = True
+            class_acc = 100.0 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0.0
+            print(f"  {c + 1}   | {int(class_total[c]):11d} | {class_acc:8.2f}%")
+            total_val_points += int(class_total[c])
+        else:
+            print(f"  {c + 1}   | {'-':11} | {'-':8}")
+    
+    print("-"*50)
+    print(f"  Всего | {total_val_points:11d} | {avg_acc:8.2f}%")
+    
+    if not any_class_processed:
+        print("⚠️  В выборке не найдено ни одного класса!")
+        print("💡 Проверьте разметку данных")
+    
+    print(f"\n📊 Общая точность: {avg_acc:.2f}%")
+    print(f"📊 Общий loss: {avg_loss:.4f}")
     
     return avg_loss, avg_acc
+
+def save_training_plots(history):
+    """Сохранение графиков обучения"""
+    try:
+        import matplotlib.pyplot as plt
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        
+        # Loss
+        ax1.plot(history['train_loss'], label='Train Loss', marker='o')
+        ax1.plot(history['val_loss'], label='Val Loss', marker='s')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training and Validation Loss')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Accuracy
+        ax2.plot(history['train_acc'], label='Train Acc', marker='o')
+        ax2.plot(history['val_acc'], label='Val Acc', marker='s')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Accuracy (%)')
+        ax2.set_title('Training and Validation Accuracy')
+        ax2.legend()
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig('checkpoints/training_history.png', dpi=300, bbox_inches='tight')
+        print("✅ График сохранен: checkpoints/training_history.png")
+        
+    except Exception as e:
+        print(f"⚠️  Не удалось сохранить графики: {e}")
 
 def main():
     try:
@@ -217,10 +318,20 @@ def main():
             print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
             print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
         
+        # Поиск LAS файла
+        print("\n🔍 Поиск LAS файла...")
+        las_file_path = find_las_file()
+        
+        if las_file_path is None:
+            print("❌ LAS файл не найден!")
+            sys.exit(1)
+        
+        print(f"✅ Используется файл: {las_file_path}")
+        
         # Создание датасета
         print("\n📦 Создание датасета...")
         full_dataset = LASDataset(
-            'Univer2019.las',
+            las_file_path,
             num_points=NUM_POINTS,
             block_size=BLOCK_SIZE,
             stride=STRIDE,
@@ -228,8 +339,11 @@ def main():
         )
         
         if len(full_dataset) == 0:
-            print("❌ Датасет пуст! Проверьте файл Univer2019.las")
+            print("❌ Датасет пуст! Проверьте файл LAS")
             sys.exit(1)
+        
+        # Анализ распределения классов в полном датасете
+        analyze_dataset_distribution(full_dataset, "полном датасете")
         
         # Разделение на train/val (80/20)
         train_size = int(0.8 * len(full_dataset))
@@ -251,7 +365,7 @@ def main():
             train_dataset,
             batch_size=BATCH_SIZE,
             shuffle=True,
-            num_workers=0,  # Изменено на 0 для Windows
+            num_workers=0,
             pin_memory=True if torch.cuda.is_available() else False
         )
         
@@ -301,8 +415,8 @@ def main():
         print(f"  • Эпох: {EPOCHS}")
         print(f"  • Batch size: {BATCH_SIZE}")
         print(f"  • Learning rate: {LEARNING_RATE}")
-        print(f"  • Точек в блоке: {NUM_POINTS}")
         print(f"  • Размер блока: {BLOCK_SIZE}m")
+        print(f"  • Исходный файл: {las_file_path}")
         print("="*60)
         
         for epoch in range(1, EPOCHS + 1):
@@ -319,7 +433,7 @@ def main():
                 print(f"\n📈 Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
                 
                 # Validation
-                val_loss, val_acc = validate(model, val_loader, criterion, device)
+                val_loss, val_acc = validate(model, val_loader, criterion, device, f"валидации эпохи {epoch}")
                 print(f"📉 Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
                 
                 # Сохранение истории
@@ -327,13 +441,6 @@ def main():
                 history['train_acc'].append(train_acc)
                 history['val_loss'].append(val_loss)
                 history['val_acc'].append(val_acc)
-                
-                # Learning rate scheduling
-                old_lr = optimizer.param_groups[0]['lr']
-                scheduler.step()
-                new_lr = optimizer.param_groups[0]['lr']
-                if old_lr != new_lr:
-                    print(f"📉 Learning rate: {old_lr:.6f} -> {new_lr:.6f}")
                 
                 # Сохранение лучшей модели
                 if val_acc > best_acc:
@@ -346,7 +453,8 @@ def main():
                         'val_acc': val_acc,
                         'val_loss': val_loss,
                         'class_weights': class_weights,
-                        'history': history
+                        'history': history,
+                        'las_file_path': las_file_path
                     }, 'checkpoints/best_model.pth')
                     print(f"💾 Сохранена лучшая модель (Val Acc: {val_acc:.2f}%)")
                 
@@ -357,34 +465,16 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_acc': val_acc,
                     'val_loss': val_loss,
-                    'history': history
+                    'history': history,
+                    'las_file_path': las_file_path
                 }, 'checkpoints/last_model.pth')
                 
-                # Сохранение checkpoint каждые 10 эпох
-                if epoch % 10 == 0:
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'history': history
-                    }, f'checkpoints/checkpoint_epoch_{epoch}.pth')
-                    print(f"💾 Checkpoint сохранен: epoch_{epoch}.pth")
-                
-                # Early stopping (если нет улучшения 30 эпох)
-                if epoch - best_epoch > 30:
-                    print(f"\n⚠️  Early stopping! Нет улучшения {epoch - best_epoch} эпох")
-                    break
+                # Learning rate scheduling
+                scheduler.step()
                 
             except Exception as e:
-                print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА на эпохе {epoch}:")
+                print(f"\n❌ Ошибка на эпохе {epoch}:")
                 print(traceback.format_exc())
-                print("\n💾 Сохранение текущего состояния...")
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'error': str(e)
-                }, 'checkpoints/error_checkpoint.pth')
                 raise
         
         print(f"\n{'='*60}")
@@ -400,41 +490,9 @@ def main():
         save_training_plots(history)
         
     except Exception as e:
-        print(f"\n❌ ФАТАЛЬНАЯ ОШИБКА:")
+        print(f"\n❌ Ошибка: {e}")
         print(traceback.format_exc())
         sys.exit(1)
-
-def save_training_plots(history):
-    """Сохранение графиков обучения"""
-    try:
-        import matplotlib.pyplot as plt
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-        
-        # Loss
-        ax1.plot(history['train_loss'], label='Train Loss', marker='o')
-        ax1.plot(history['val_loss'], label='Val Loss', marker='s')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.set_title('Training and Validation Loss')
-        ax1.legend()
-        ax1.grid(True)
-        
-        # Accuracy
-        ax2.plot(history['train_acc'], label='Train Acc', marker='o')
-        ax2.plot(history['val_acc'], label='Val Acc', marker='s')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('Accuracy (%)')
-        ax2.set_title('Training and Validation Accuracy')
-        ax2.legend()
-        ax2.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig('checkpoints/training_history.png', dpi=300, bbox_inches='tight')
-        print("✅ График сохранен: checkpoints/training_history.png")
-        
-    except Exception as e:
-        print(f"⚠️  Не удалось сохранить графики: {e}")
 
 if __name__ == '__main__':
     main()
