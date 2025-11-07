@@ -20,9 +20,20 @@ class LASDataset(Dataset):
         
         # Извлечение меток (если есть)
         try:
-            self.labels = las.classification.astype(np.int64) - 1  # Классы 1-8 -> 0-7
+            self.labels = np.array(las.classification).astype(np.int64) - 1  # Классы 1-8 -> 0-7
             self.has_labels = True
-        except:
+            
+            # Проверяем какие классы действительно есть в данных
+            unique_labels = np.unique(self.labels)
+            print(f"🏷️  Классы в LAS файле: {unique_labels + 1}")
+            print(f"📊 Количество точек по классам:")
+            for class_id in unique_labels:
+                count = np.sum(self.labels == class_id)
+                percentage = 100.0 * count / len(self.labels)
+                print(f"   Класс {class_id + 1}: {count} точек ({percentage:.2f}%)")
+                
+        except Exception as e:
+            print(f"⚠️  Ошибка при чтении меток: {e}")
             self.labels = np.zeros(len(self.points), dtype=np.int64)
             self.has_labels = False
         
@@ -35,9 +46,21 @@ class LASDataset(Dataset):
         
         print(f"✅ Загружено {len(self.points)} точек")
         print(f"📦 Создано {len(self.blocks)} блоков")
-        if self.has_labels:
-            unique_labels = np.unique(self.labels)
-            print(f"🏷️  Уникальные классы: {unique_labels + 1}")
+        
+        # Анализ распределения классов в блоках
+        self._analyze_block_classes()
+    
+    def _analyze_block_classes(self):
+        """Анализ каких классов в блоках"""
+        if not self.has_labels:
+            return
+            
+        print(f"🔍 Анализ классов в первых 10 блоках:")
+        for i in range(min(10, len(self.blocks))):
+            indices = self.blocks[i]
+            block_labels = self.labels[indices]
+            unique_classes = np.unique(block_labels)
+            print(f"   Блок {i}: классы {[c + 1 for c in unique_classes.tolist()]}")
     
     def _create_blocks(self):
         """Разбиение облака точек на блоки"""
