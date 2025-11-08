@@ -78,14 +78,12 @@ def calculate_class_weights(dataset):
     all_labels = np.concatenate(all_labels)
     unique, counts = np.unique(all_labels, return_counts=True)
     
-    print(f"📊 Найдены классы: {unique + 1}")
+    print(f"📊 Найдены классы: {unique}")
     print(f"📊 Количество точек по классам: {counts}")
     
-    total = len(all_labels)
-    weights = total / (len(unique) * counts)
-    
-    # Нормализация весов
-    weights = weights / weights.sum() * len(unique)
+    # Правильное вычисление весов с защитой от деления на ноль
+    weights = 1.0 / (counts + 1e-6)  # Добавляем epsilon для избежания деления на 0
+    weights = weights / weights.sum() * len(weights)  # Нормализация
     
     weight_dict = {int(u): float(w) for u, w in zip(unique, weights)}
     print(f"⚖️  Веса классов: {weight_dict}")
@@ -142,13 +140,19 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch):
             # Прямой проход
             pred = model(points)  # (B, N, num_classes)
             
+            # Проверка на NaN в предсказаниях
+            if torch.isnan(pred).any():
+                print(f"⚠️  Обнаружены NaN в предсказаниях на батче {batch_idx}")
+                continue
+            
             # Вычисление loss
             pred = pred.contiguous().view(-1, pred.size(-1))
             labels = labels.view(-1)
             loss = criterion(pred, labels)
             
-            # Проверка на NaN
+            # Проверка на NaN в loss
             if torch.isnan(loss):
+                print(f"⚠️  Обнаружен NaN в loss на батче {batch_idx}")
                 continue
             
             # Обратный проход
@@ -269,25 +273,29 @@ def save_training_plots(history):
     try:
         import matplotlib.pyplot as plt
         
+        epochs = list(range(len(history['train_loss'])))
+        
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
         
         # Loss
-        ax1.plot(history['train_loss'], label='Train Loss', marker='o')
-        ax1.plot(history['val_loss'], label='Val Loss', marker='s')
+        ax1.plot(epochs, history['train_loss'], label='Train Loss', marker='o')
+        ax1.plot(epochs, history['val_loss'], label='Val Loss', marker='s')
         ax1.set_xlabel('Epoch')
         ax1.set_ylabel('Loss')
         ax1.set_title('Training and Validation Loss')
         ax1.legend()
         ax1.grid(True)
+        ax1.set_xticks(epochs)
         
         # Accuracy
-        ax2.plot(history['train_acc'], label='Train Acc', marker='o')
-        ax2.plot(history['val_acc'], label='Val Acc', marker='s')
+        ax2.plot(epochs, history['train_acc'], label='Train Acc', marker='o')
+        ax2.plot(epochs, history['val_acc'], label='Val Acc', marker='s')
         ax2.set_xlabel('Epoch')
         ax2.set_ylabel('Accuracy (%)')
         ax2.set_title('Training and Validation Accuracy')
         ax2.legend()
         ax2.grid(True)
+        ax2.set_xticks(epochs)
         
         plt.tight_layout()
         plt.savefig('checkpoints/training_history.png', dpi=300, bbox_inches='tight')
@@ -298,6 +306,12 @@ def save_training_plots(history):
 
 def main():
     try:
+        # Фиксация random seed для воспроизводимости
+        torch.manual_seed(42)
+        np.random.seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+        
         # Настройка логирования
         log_file = setup_logging()
         print(f"📝 Логи сохраняются в: {log_file}\n")
@@ -345,7 +359,7 @@ def main():
         # Анализ распределения классов в полном датасете
         analyze_dataset_distribution(full_dataset, "полном датасете")
         
-        # Разделение на train/val (80/20)
+        # Разделение на train/val (80/20) с фиксированным seed
         train_size = int(0.8 * len(full_dataset))
         val_size = len(full_dataset) - train_size
         
@@ -354,10 +368,11 @@ def main():
             sys.exit(1)
         
         train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size]
+            full_dataset, [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)  # Фиксируем seed
         )
         
-        print(f"📚 Train: {train_size} блоков, Val: {val_size} блоков")
+        print(f"📚 Train: {len(train_dataset)} блоков, Val: {len(val_dataset)} блоков")
         
         # DataLoaders
         print("\n🔄 Создание DataLoaders...")
@@ -391,23 +406,31 @@ def main():
         class_weights = calculate_class_weights(full_dataset)
         class_weights = class_weights.to(device)
         
-        # Loss и optimizer
-        criterion = nn.NLLLoss(weight=class_weights)
+        # Loss и optimizer - используем CrossEntropyLoss вместо NLLLoss
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
         
         # Создание папки для checkpoints
         os.makedirs('checkpoints', exist_ok=True)
         
+        # Начальная валидация перед обучением
+        print("\n🔍 Начальная валидация до обучения...")
+        initial_val_loss, initial_val_acc = validate(model, val_loader, criterion, device, "начальной валидации")
+
+        print(f"📊 Начальная точность: {initial_val_acc:.2f}%")
+        
         # Обучение
-        best_acc = 0
+        best_acc = initial_val_acc
         best_epoch = 0
         history = {
-            'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': []
+            'train_loss': [initial_val_loss],  # Используем val loss как начальный
+            'train_acc': [initial_val_acc],    # Используем val acc как начальный
+            'val_loss': [initial_val_loss],
+            'val_acc': [initial_val_acc]
         }
+        
+        print(f"📊 Начальная точность: {initial_val_acc:.2f}%")
         
         print("\n🚀 Начало обучения...\n")
         print("="*60)
@@ -475,7 +498,7 @@ def main():
             except Exception as e:
                 print(f"\n❌ Ошибка на эпохе {epoch}:")
                 print(traceback.format_exc())
-                raise
+                continue  # Продолжаем обучение вместо прерывания
         
         print(f"\n{'='*60}")
         print("  ✅ ОБУЧЕНИЕ ЗАВЕРШЕНО!")
@@ -490,7 +513,7 @@ def main():
         save_training_plots(history)
         
     except Exception as e:
-        print(f"\n❌ Ошибка: {e}")
+        print(f"\n❌ Критическая ошибка: {e}")
         print(traceback.format_exc())
         sys.exit(1)
 
